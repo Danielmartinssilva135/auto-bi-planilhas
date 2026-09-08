@@ -26,13 +26,6 @@ st.markdown("""
         font-weight: 600;
         font-size: 15px;
     }
-    .metric-box {
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        padding: 15px;
-        border-radius: 10px;
-        color: #F8FAFC;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -40,15 +33,19 @@ st.markdown('<div class="main-header">📑 Auto-BI: Cruzador de Dados & Tabelas 
 st.caption("Suba qualquer planilha (.xlsx, .xls, .csv), faça PROCV visual sem fórmulas, crie tabelas dinâmicas e gere gráficos instantâneos.")
 st.markdown("---")
 
-# Função para leitura universal de planilhas
+# Função para leitura universal de planilhas e limpeza de colunas duplicadas
 def carregar_planilha(arquivo):
     if arquivo.name.endswith('.csv'):
         try:
-            return pd.read_csv(arquivo, sep=None, engine='python')
+            df = pd.read_csv(arquivo, sep=None, engine='python')
         except Exception:
-            return pd.read_csv(arquivo, encoding='latin1', sep=';')
+            df = pd.read_csv(arquivo, encoding='latin1', sep=';')
     else:
-        return pd.read_excel(arquivo)
+        df = pd.read_excel(arquivo)
+    
+    # Remove espaços em branco nos nomes das colunas e garante unicidade
+    df.columns = [str(col).strip() for col in df.columns]
+    return df
 
 # Função para exportação em Excel
 def to_excel(df):
@@ -173,12 +170,16 @@ with aba_pivot:
         
         col_c1, col_c2, col_c3, col_c4 = st.columns(4)
         
+        colunas_lista = list(df_pivot.columns)
+        
         with col_c1:
-            eixo_linha = st.selectbox("Linhas do Agrupamento (Index):", df_pivot.columns)
+            eixo_linha = st.selectbox("Linhas do Agrupamento (Index):", colunas_lista, index=0)
         with col_c2:
-            eixo_coluna = st.selectbox("Colunas (Opcional):", ["Nenhum"] + list(df_pivot.columns))
+            eixo_coluna = st.selectbox("Colunas (Opcional):", ["Nenhum"] + colunas_lista, index=0)
         with col_c3:
-            eixo_valor = st.selectbox("Coluna de Valores / Métricas:", df_pivot.columns)
+            # Default para uma coluna diferente da linha inicial se possível
+            idx_val = 1 if len(colunas_lista) > 1 else 0
+            eixo_valor = st.selectbox("Coluna de Valores / Métricas:", colunas_lista, index=idx_val)
         with col_c4:
             tipo_agregacao = st.selectbox(
                 "Operação de Cálculo:",
@@ -192,16 +193,32 @@ with aba_pivot:
                 }[x]
             )
 
-        col_col = None if eixo_coluna == "Nenhum" else eixo_coluna
-        
         try:
-            pivot_table = df_pivot.pivot_table(
-                index=eixo_linha,
-                columns=col_col,
-                values=eixo_valor,
-                aggfunc=tipo_agregacao,
-                fill_value=0
-            )
+            # Tratamento numérico caso a operação exija número (soma, média, min, max)
+            df_calc = df_pivot.copy()
+            if tipo_agregacao in ["sum", "mean", "min", "max"]:
+                df_calc[eixo_valor] = pd.to_numeric(df_calc[eixo_valor], errors='coerce').fillna(0)
+
+            # Execução de Agrupamento Dinâmico com fallback robusto
+            if eixo_coluna == "Nenhum":
+                if tipo_agregacao == "count":
+                    pivot_table = df_calc.groupby(eixo_linha)[[eixo_valor]].count().rename(columns={eixo_valor: f"Contagem de {eixo_valor}"})
+                elif tipo_agregacao == "sum":
+                    pivot_table = df_calc.groupby(eixo_linha)[[eixo_valor]].sum().rename(columns={eixo_valor: f"Soma de {eixo_valor}"})
+                elif tipo_agregacao == "mean":
+                    pivot_table = df_calc.groupby(eixo_linha)[[eixo_valor]].mean().rename(columns={eixo_valor: f"Média de {eixo_valor}"})
+                elif tipo_agregacao == "min":
+                    pivot_table = df_calc.groupby(eixo_linha)[[eixo_valor]].min().rename(columns={eixo_valor: f"Mínimo de {eixo_valor}"})
+                elif tipo_agregacao == "max":
+                    pivot_table = df_calc.groupby(eixo_linha)[[eixo_valor]].max().rename(columns={eixo_valor: f"Máximo de {eixo_valor}"})
+            else:
+                pivot_table = df_calc.pivot_table(
+                    index=eixo_linha,
+                    columns=eixo_coluna,
+                    values=eixo_valor,
+                    aggfunc=tipo_agregacao,
+                    fill_value=0
+                )
             
             st.markdown("### 📋 Tabela Dinâmica Processada")
             st.dataframe(pivot_table, use_container_width=True)
@@ -218,21 +235,23 @@ with aba_pivot:
             st.markdown("### 📈 Gráficos Automáticos")
             
             df_chart = pivot_table.reset_index()
+            col_metrica = pivot_table.columns[0] if eixo_coluna == "Nenhum" else None
+            
             tipo_grafico = st.selectbox("Selecione o Modelo de Gráfico:", ["Barras", "Linhas", "Rosca / Pizza"])
             
             if tipo_grafico == "Barras":
-                if col_col:
+                if eixo_coluna != "Nenhum":
                     fig = px.bar(df_chart, x=eixo_linha, y=pivot_table.columns, barmode="group")
                 else:
-                    fig = px.bar(df_chart, x=eixo_linha, y=eixo_valor, color=eixo_linha)
+                    fig = px.bar(df_chart, x=eixo_linha, y=col_metrica, color=eixo_linha)
             elif tipo_grafico == "Linhas":
-                if col_col:
+                if eixo_coluna != "Nenhum":
                     fig = px.line(df_chart, x=eixo_linha, y=pivot_table.columns, markers=True)
                 else:
-                    fig = px.line(df_chart, x=eixo_linha, y=eixo_valor, markers=True)
+                    fig = px.line(df_chart, x=eixo_linha, y=col_metrica, markers=True)
             elif tipo_grafico == "Rosca / Pizza":
-                if not col_col:
-                    fig = px.pie(df_chart, names=eixo_linha, values=eixo_valor, hole=0.45)
+                if eixo_coluna == "Nenhum":
+                    fig = px.pie(df_chart, names=eixo_linha, values=col_metrica, hole=0.45)
                 else:
                     st.warning("Para gráficos de Pizza/Rosca, selecione 'Nenhum' no campo de Colunas acima.")
                     fig = None
@@ -246,4 +265,4 @@ with aba_pivot:
                 st.plotly_chart(fig, use_container_width=True)
                 
         except Exception as e:
-            st.error(f"Erro na agregação. Para operações de Soma ou Média, certifique-se de que a coluna de valores contém dados numéricos válidos. Detalhes: {e}")
+            st.error(f"Erro no processamento: {e}")
